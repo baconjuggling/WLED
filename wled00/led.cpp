@@ -34,34 +34,37 @@ void toggleOnOff()
 }
 
 
-void setAllLeds() {
-  if (!realtimeMode || !arlsForceMaxBri)
-  {
-    double d = briT*briMultiplier;
-    int val = d/100;
-    if (val > 255) val = 255;
-    strip.setBrightness(val);
-  }
-  if (useRGBW && strip.rgbwMode == RGBW_MODE_LEGACY)
-  {
-    colorRGBtoRGBW(colT);
-    colorRGBtoRGBW(colSecT);
-  }
-  strip.setColor(0, colT[0], colT[1], colT[2], colT[3]);
-  strip.setColor(1, colSecT[0], colSecT[1], colSecT[2], colSecT[3]);
+//scales the brightness with the briMultiplier factor
+byte scaledBri(byte in)
+{
+  uint32_t d = in*briMultiplier;
+  uint32_t val = d/100;
+  if (val > 255) val = 255;
+  return (byte)val;
 }
 
 
-void setLedsStandard(bool justColors)
-{
-  for (byte i=0; i<4; i++)
+void setAllLeds() {
+  if (!realtimeMode || !arlsForceMaxBri)
   {
-    colOld[i] = col[i];
-    colT[i] = col[i];
-    colSecOld[i] = colSec[i];
-    colSecT[i] = colSec[i];
+    strip.setBrightness(scaledBri(briT));
   }
-  if (justColors) return;
+  if (useRGBW && strip.rgbwMode == RGBW_MODE_LEGACY)
+  {
+    colorRGBtoRGBW(col);
+    colorRGBtoRGBW(colSec);
+  }
+  strip.setColor(0, col[0], col[1], col[2], col[3]);
+  strip.setColor(1, colSec[0], colSec[1], colSec[2], colSec[3]);
+  if (useRGBW && strip.rgbwMode == RGBW_MODE_LEGACY)
+  {
+    col[3] = 0; colSec[3] = 0;
+  }
+}
+
+
+void setLedsStandard()
+{
   briOld = bri;
   briT = bri;
   setAllLeds();
@@ -87,9 +90,21 @@ void colorUpdated(int callMode)
   if (callMode != NOTIFIER_CALL_MODE_INIT && 
       callMode != NOTIFIER_CALL_MODE_DIRECT_CHANGE && 
       callMode != NOTIFIER_CALL_MODE_NO_NOTIFY) strip.applyToAllSelected = true; //if not from JSON api, which directly sets segments
+
+  bool someSel = false;
+
+  if (callMode == NOTIFIER_CALL_MODE_NOTIFICATION) {
+    someSel = (receiveNotificationBrightness || receiveNotificationColor || receiveNotificationEffects);
+  }
   
+  //Notifier: apply received FX to selected segments only if actually receiving FX
+  if (someSel) strip.applyToAllSelected = receiveNotificationEffects;
+
   bool fxChanged = strip.setEffectConfig(effectCurrent, effectSpeed, effectIntensity, effectPalette);
   bool colChanged = colorChanged();
+
+  //Notifier: apply received color to selected segments only if actually receiving color
+  if (someSel) strip.applyToAllSelected = receiveNotificationColor;
 
   if (fxChanged || colChanged)
   {
@@ -100,7 +115,7 @@ void colorUpdated(int callMode)
     notify(callMode);
     
     //set flag to update blynk and mqtt
-    if (callMode != NOTIFIER_CALL_MODE_PRESET_CYCLE) interfaceUpdateCallMode = callMode;
+    interfaceUpdateCallMode = callMode;
   } else {
     if (nightlightActive && !nightlightActiveOld && 
         callMode != NOTIFIER_CALL_MODE_NOTIFICATION && 
@@ -126,7 +141,7 @@ void colorUpdated(int callMode)
   }
   if (briT == 0)
   {
-    setLedsStandard(true);                                            //do not color transition if starting from off
+    //setLedsStandard(true); //do not color transition if starting from off!
     if (callMode != NOTIFIER_CALL_MODE_NOTIFICATION) resetTimebase(); //effect start from beginning
   }
 
@@ -141,15 +156,11 @@ void colorUpdated(int callMode)
     //set correct delay if not using notification delay
     if (callMode != NOTIFIER_CALL_MODE_NOTIFICATION && !jsonTransitionOnce) transitionDelayTemp = transitionDelay;
     jsonTransitionOnce = false;
+    strip.setTransition(transitionDelayTemp);
     if (transitionDelayTemp == 0) {setLedsStandard(); strip.trigger(); return;}
     
     if (transitionActive)
     {
-      for (byte i=0; i<4; i++)
-      {
-        colOld[i] = colT[i];
-        colSecOld[i] = colSecT[i];
-      }
       briOld = briT;
       tperLast = 0;
     }
@@ -158,6 +169,7 @@ void colorUpdated(int callMode)
     transitionStartTime = millis();
   } else
   {
+    strip.setTransition(0);
     setLedsStandard();
     strip.trigger();
   }
@@ -203,11 +215,6 @@ void handleTransitions()
     }
     if (tper - tperLast < 0.004) return;
     tperLast = tper;
-    for (byte i=0; i<4; i++)
-    {
-      colT[i] = colOld[i]+((col[i] - colOld[i])*tper);
-      colSecT[i] = colSecOld[i]+((colSec[i] - colSecOld[i])*tper);
-    }
     briT    = briOld   +((bri    - briOld   )*tper);
     
     setAllLeds();
@@ -275,7 +282,7 @@ void handleNightlight()
       }
       updateBlynk();
       if (macroNl > 0)
-        applyMacro(macroNl);
+        applyPreset(macroNl);
       nightlightActiveOld = false;
     }
   } else if (nightlightActiveOld) //early de-init
@@ -296,10 +303,10 @@ void handleNightlight()
     if (bri == 0 || nightlightActive) return;
 
     if (presetCycCurr < presetCycleMin || presetCycCurr > presetCycleMax) presetCycCurr = presetCycleMin;
-    applyPreset(presetCycCurr,presetApplyBri);
+    applyPreset(presetCycCurr); //this handles colorUpdated() for us
     presetCycCurr++;
-    if (presetCycCurr > 16) presetCycCurr = 1;
-    colorUpdated(NOTIFIER_CALL_MODE_PRESET_CYCLE);
+    if (presetCycCurr > 250) presetCycCurr = 1;
+    interfaceUpdateCallMode = 0; //disable updates to MQTT and Blynk
   }
 }
 
